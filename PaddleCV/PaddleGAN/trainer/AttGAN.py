@@ -165,17 +165,16 @@ class DTrainer():
         grad_shape = grad.shape
         grad = fluid.layers.reshape(
             grad, [-1, grad_shape[1] * grad_shape[2] * grad_shape[3]])
+        epsilon = 1e-16
         norm = fluid.layers.sqrt(
             fluid.layers.reduce_sum(
-                fluid.layers.square(grad), dim=1))
+                fluid.layers.square(grad), dim=1) + epsilon)
         gp = fluid.layers.reduce_mean(fluid.layers.square(norm - 1.0))
         return gp
 
 
 class AttGAN(object):
     def add_special_args(self, parser):
-        parser.add_argument(
-            '--image_size', type=int, default=256, help="image size")
         parser.add_argument(
             '--g_lr',
             type=float,
@@ -228,6 +227,12 @@ class AttGAN(object):
             type=int,
             default=5,
             help="default layers in the network")
+        parser.add_argument(
+            '--dis_norm',
+            type=str,
+            default=None,
+            help="the normalization in discriminator, choose in [None, instance_norm]"
+        )
 
         return parser
 
@@ -332,10 +337,9 @@ class AttGAN(object):
                     t_time += batch_time
                     print("epoch{}: batch{}:  \n\
                          d_loss: {}; d_loss_real: {}; d_loss_fake: {}; d_loss_cls: {}; d_loss_gp: {} \n\
-                         Batch_time_cost: {:.2f}"
-                          .format(epoch_id, batch_id, d_loss[0], d_loss_real[
-                              0], d_loss_fake[0], d_loss_cls[0], d_loss_gp[0],
-                                  batch_time))
+                         Batch_time_cost: {}".format(epoch_id, batch_id, d_loss[
+                        0], d_loss_real[0], d_loss_fake[0], d_loss_cls[0],
+                                                     d_loss_gp[0], batch_time))
                 # optimize the generator network
                 else:
                     d_fetches = [

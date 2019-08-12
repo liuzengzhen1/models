@@ -22,6 +22,17 @@ import glob
 import numpy as np
 from PIL import Image
 
+def set_paddle_flags(**kwargs):
+    for key, value in kwargs.items():
+        if os.environ.get(key, None) is None:
+            os.environ[key] = str(value)
+
+# NOTE(paddle-dev): All of these flags should be set before
+# `import paddle`. Otherwise, it would not take any effect.
+set_paddle_flags(
+    FLAGS_eager_delete_tensor_gb=0,  # enable GC to save memory
+)
+
 from paddle import fluid
 
 from ppdet.core.workspace import load_config, merge_config, create
@@ -30,6 +41,7 @@ from ppdet.data.data_feed import create_reader
 
 from ppdet.utils.eval_utils import parse_fetches
 from ppdet.utils.cli import ArgsParser
+from ppdet.utils.check import check_gpu
 from ppdet.utils.visualizer import visualize_results
 import ppdet.utils.checkpoint as checkpoint
 
@@ -81,6 +93,48 @@ def get_test_images(infer_dir, infer_img):
     return images
 
 
+def prune_feed_vars(feeded_var_names, target_vars, prog):
+    """
+    Filter out feed variables which are not in program,
+    pruned feed variables are only used in post processing
+    on model output, which are not used in program, such
+    as im_id to identify image order, im_shape to clip bbox
+    in image.
+    """
+    exist_var_names = []
+    prog = prog.clone()
+    prog = prog._prune(targets=target_vars)
+    global_block = prog.global_block()
+    for name in feeded_var_names:
+        try:
+            v = global_block.var(name)
+            exist_var_names.append(v.name)
+        except Exception:
+            logger.info('save_inference_model pruned unused feed '
+                        'variables {}'.format(name))
+            pass
+    return exist_var_names
+
+
+def save_infer_model(FLAGS, exe, feed_vars, test_fetches, infer_prog):
+    cfg_name = os.path.basename(FLAGS.config).split('.')[0]
+    save_dir = os.path.join(FLAGS.output_dir, cfg_name)
+    feeded_var_names = [var.name for var in feed_vars.values()]
+    target_vars = list(test_fetches.values())
+    feeded_var_names = prune_feed_vars(feeded_var_names, target_vars,
+                                       infer_prog)
+    logger.info("Save inference model to {}, input: {}, output: "
+                "{}...".format(save_dir, feeded_var_names,
+                               [var.name for var in target_vars]))
+    fluid.io.save_inference_model(
+        save_dir,
+        feeded_var_names=feeded_var_names,
+        target_vars=target_vars,
+        executor=exe,
+        main_program=infer_prog,
+        params_filename="__params__")
+
+
 def main():
     cfg = load_config(FLAGS.config)
 
@@ -90,6 +144,9 @@ def main():
         raise ValueError("'architecture' not specified in config file.")
 
     merge_config(FLAGS.opt)
+
+    # check if set use_gpu=True in paddlepaddle cpu version
+    check_gpu(cfg.use_gpu)
 
     if 'test_feed' not in cfg:
         test_feed = create(main_arch + 'TestFeed')
@@ -119,12 +176,17 @@ def main():
     if cfg.weights:
         checkpoint.load_checkpoint(exe, infer_prog, cfg.weights)
 
+    if FLAGS.save_inference_model:
+        save_infer_model(FLAGS, exe, feed_vars, test_fetches, infer_prog)
+
     # parse infer fetches
+    assert cfg.metric in ['COCO', 'VOC'], \
+            "unknown metric type {}".format(cfg.metric)
     extra_keys = []
     if cfg['metric'] == 'COCO':
         extra_keys = ['im_info', 'im_id', 'im_shape']
     if cfg['metric'] == 'VOC':
-        extra_keys = ['im_id']
+        extra_keys = ['im_id', 'im_shape']
     keys, values, _ = parse_fetches(test_fetches, infer_prog, extra_keys)
 
     # parse dataset category
@@ -138,6 +200,12 @@ def main():
     use_default_label = getattr(test_feed, 'use_default_label', False)
     clsid2catid, catid2name = get_category_info(anno_file, with_background,
                                                 use_default_label)
+
+    # whether output bbox is normalized in model output layer
+    is_bbox_normalized = False
+    if hasattr(model, 'is_bbox_normalized') and \
+            callable(model.is_bbox_normalized):
+        is_bbox_normalized = model.is_bbox_normalized()
 
     imid2path = reader.imid2path
     for iter_id, data in enumerate(reader()):
@@ -153,7 +221,6 @@ def main():
 
         bbox_results = None
         mask_results = None
-        is_bbox_normalized = True if cfg.metric == 'VOC' else False
         if 'bbox' in res:
             bbox_results = bbox2out([res], clsid2catid, is_bbox_normalized)
         if 'mask' in res:
@@ -168,10 +235,10 @@ def main():
             image = visualize_results(image,
                                       int(im_id), catid2name,
                                       FLAGS.draw_threshold, bbox_results,
-                                      mask_results, is_bbox_normalized)
+                                      mask_results)
             save_name = get_save_image_name(FLAGS.output_dir, image_path)
             logger.info("Detection bbox results save in {}".format(save_name))
-            image.save(save_name)
+            image.save(save_name, quality=95)
 
 
 if __name__ == '__main__':
@@ -196,5 +263,10 @@ if __name__ == '__main__':
         type=float,
         default=0.5,
         help="Threshold to reserve the result for visualization.")
+    parser.add_argument(
+        "--save_inference_model",
+        action='store_true',
+        default=False,
+        help="Save inference model in output_dir if True.")
     FLAGS = parser.parse_args()
     main()

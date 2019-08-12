@@ -39,6 +39,7 @@ class SSD(object):
 
     __category__ = 'architecture'
     __inject__ = ['backbone', 'multi_box_head', 'output_decoder', 'metric']
+    __shared__ = ['num_classes']
 
     def __init__(self,
                  backbone,
@@ -57,12 +58,11 @@ class SSD(object):
         if isinstance(metric, dict):
             self.metric = SSDMetric(**metric)
 
-    def _forward(self, feed_vars, mode='train'):
+    def build(self, feed_vars, mode='train'):
         im = feed_vars['image']
         if mode == 'train' or mode == 'eval':
             gt_box = feed_vars['gt_box']
             gt_label = feed_vars['gt_label']
-            difficult = feed_vars['is_difficult']
 
         body_feats = self.backbone(im)
         locs, confs, box, box_var = self.multi_box_head(
@@ -75,23 +75,18 @@ class SSD(object):
             return {'loss': loss}
         else:
             pred = self.output_decoder(locs, confs, box, box_var)
-            if mode == 'eval':
-                map_eval = self.metric(
-                    pred,
-                    gt_label,
-                    gt_box,
-                    difficult,
-                    class_num=self.num_classes)
-                _, accum_map = map_eval.get_map_var()
-                return {'map': map_eval, 'accum_map': accum_map}
-            else:
-                return {'bbox': pred}
+            return {'bbox': pred}
 
     def train(self, feed_vars):
-        return self._forward(feed_vars, 'train')
+        return self.build(feed_vars, 'train')
 
     def eval(self, feed_vars):
-        return self._forward(feed_vars, 'eval')
+        return self.build(feed_vars, 'eval')
 
     def test(self, feed_vars):
-        return self._forward(feed_vars, 'test')
+        return self.build(feed_vars, 'test')
+
+    def is_bbox_normalized(self):
+        # SSD use output_decoder in output layers, bbox is normalized
+        # to range [0, 1], is_bbox_normalized is used in eval.py and infer.py
+        return True

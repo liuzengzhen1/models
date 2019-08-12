@@ -189,17 +189,16 @@ class DTrainer():
         grad_shape = grad.shape
         grad = fluid.layers.reshape(
             grad, [-1, grad_shape[1] * grad_shape[2] * grad_shape[3]])
+        epsilon = 1e-16
         norm = fluid.layers.sqrt(
             fluid.layers.reduce_sum(
-                fluid.layers.square(grad), dim=1))
+                fluid.layers.square(grad), dim=1) + epsilon)
         gp = fluid.layers.reduce_mean(fluid.layers.square(norm - 1.0))
         return gp
 
 
 class StarGAN(object):
     def add_special_args(self, parser):
-        parser.add_argument(
-            '--image_size', type=int, default=256, help="image size")
         parser.add_argument(
             '--g_lr', type=float, default=0.0001, help="learning rate of g")
         parser.add_argument(
@@ -308,12 +307,8 @@ class StarGAN(object):
                 loss_name=dis_trainer.d_loss.name,
                 build_strategy=build_strategy)
 
-        #losses = [[], []]
         t_time = 0
 
-        test_program = gen_trainer.infer_program
-        utility.save_test_image(0, self.cfg, exe, place, test_program,
-                                gen_trainer, self.test_reader)
         for epoch_id in range(self.cfg.epoch):
             batch_id = 0
             for i in range(self.batch_num):
@@ -365,7 +360,7 @@ class StarGAN(object):
                 if batch_id % self.cfg.print_freq == 0:
                     print("epoch{}: batch{}: \n\
                          d_loss_real: {}; d_loss_fake: {}; d_loss_cls: {}; d_loss_gp: {} \n\
-                         Batch_time_cost: {:.2f}".format(
+                         Batch_time_cost: {}".format(
                         epoch_id, batch_id, d_loss_real[0], d_loss_fake[
                             0], d_loss_cls[0], d_loss_gp[0], batch_time))
 
